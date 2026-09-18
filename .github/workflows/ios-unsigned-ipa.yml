@@ -35,6 +35,51 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Generate Info.plist
+        run: |
+          set -euxo pipefail
+          # 关闭签名后 Xcode 不会自动生成 Info.plist（GenerateInfoPlist 被跳过），
+          # 导致最后的 Validate 步骤找不到文件而报错。这里显式提供一个。
+          cat > "$RUNNER_TEMP/Info.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+            <key>CFBundleDisplayName</key><string>流映</string>
+            <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+            <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>1.0.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>LSRequiresIPhoneOS</key><true/>
+            <key>LSApplicationCategoryType</key><string>public.app-category.entertainment</string>
+            <key>UIApplicationSupportsIndirectInputEvents</key><true/>
+            <key>UILaunchScreen</key><dict/>
+            <key>UISupportedInterfaceOrientations</key>
+            <array>
+              <string>UIInterfaceOrientationPortrait</string>
+              <string>UIInterfaceOrientationLandscapeLeft</string>
+              <string>UIInterfaceOrientationLandscapeRight</string>
+            </array>
+            <key>UISupportedInterfaceOrientations~ipad</key>
+            <array>
+              <string>UIInterfaceOrientationPortrait</string>
+              <string>UIInterfaceOrientationPortraitUpsideDown</string>
+              <string>UIInterfaceOrientationLandscapeLeft</string>
+              <string>UIInterfaceOrientationLandscapeRight</string>
+            </array>
+            <key>NSAppTransportSecurity</key>
+            <dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+            <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
+            <key>MinimumOSVersion</key><string>16.0</string>
+          </dict>
+          </plist>
+          EOF
+          plutil -lint "$RUNNER_TEMP/Info.plist"
+
       - name: Generate Xcode project
         run: xcodegen generate
 
@@ -48,6 +93,8 @@ jobs:
             -sdk iphoneos \
             -derivedDataPath "$RUNNER_TEMP/dd" \
             -destination "generic/platform=iOS" \
+            INFOPLIST_FILE="$RUNNER_TEMP/Info.plist" \
+            GENERATE_INFOPLIST_FILE=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -61,6 +108,13 @@ jobs:
           set -euxo pipefail
           APP=$(find "$RUNNER_TEMP/dd/Build/Products" -name "FlowBox.app" -type d -print -quit)
           test -n "$APP"
+
+          # 兜底：万一 Info.plist 仍未落到 .app 内，就从备用文件补上
+          if [ ! -f "$APP/Info.plist" ]; then
+            cp "$RUNNER_TEMP/Info.plist" "$APP/Info.plist"
+          fi
+          plutil -lint "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist"
 
           # LiveContainer 需要可执行文件保持未签名；顺便清掉 _CodeSignature
           rm -rf "$APP/_CodeSignature" "$APP/embedded.mobileprovision"
