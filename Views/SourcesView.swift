@@ -37,7 +37,7 @@ struct SourcesView: View {
             Label("只添加你有权使用的地址", systemImage: "checkmark.shield")
                 .font(.headline)
                 .foregroundStyle(.cyan)
-            Text("支持远程 M3U / M3U8、TXT 和通用 JSON。源内容只在本机解析和保存，不会上传到流映服务器。")
+            Text("支持 M3U / M3U8、TXT、通用 JSON，以及 TVBox / PeekPro 配置。源内容只在本机解析和保存，不会上传到流映服务器。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -46,7 +46,7 @@ struct SourcesView: View {
     private var addForm: some View {
         VStack(spacing: 12) {
             TextField("源名称（可选）", text: $sourceName)
-            TextField("https://example.com/source.m3u", text: $sourceURL)
+            TextField("https://example.com/source.m3u 或 TVBox 配置地址", text: $sourceURL)
                 .textInputAutocapitalization(.never)
                 .keyboardType(.URL)
             Picker("格式", selection: $sourceFormat) {
@@ -102,6 +102,7 @@ struct SourceRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(source.name).font(.headline)
                 Text(source.urlString).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(source.format.label).font(.caption2).foregroundStyle(.cyan)
                 if let date = source.lastUpdated { Text("更新于 \(date.formatted(date: .abbreviated, time: .shortened))").font(.caption2).foregroundStyle(.secondary) }
             }
             Spacer()
