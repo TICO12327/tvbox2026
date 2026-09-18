@@ -16,8 +16,12 @@ targets:
     sources:
       - path: App
       - path: Models
+      - path: Runtime
       - path: Services
       - path: Views
+    frameworks:
+      - path: Vendor/NodeMobile.framework
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.tico.FlowBox
@@ -29,5 +33,9 @@ targets:
         INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: true
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: false
+        SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/Runtime/FlowBox-Bridging-Header.h
+        FRAMEWORK_SEARCH_PATHS: $(inherited) "$(SRCROOT)/Vendor"
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) "@executable_path/Frameworks"
+        OTHER_LDFLAGS: $(inherited) -framework NodeMobile
     scheme:
       gatherCoverageData: false
