@@ -21,6 +21,9 @@ on:
 jobs:
   build:
     runs-on: macos-14
+    # 让内置 GITHUB_TOKEN 具备创建 Release 的权限（否则发布步骤 403）
+    permissions:
+      contents: write
     env:
       BUNDLE_ID: ${{ github.event.inputs.bundle_id || 'com.tico.FlowBox' }}
     steps:
