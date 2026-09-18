@@ -1,0 +1,33 @@
+name: FlowBox
+options:
+  bundleIdPrefix: com.tico
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: 5.9
+    DEVELOPMENT_TEAM: ""
+targets:
+  FlowBox:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: App
+      - path: Models
+      - path: Services
+      - path: Views
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tico.FlowBox
+        PRODUCT_NAME: FlowBox
+        INFOPLIST_KEY_CFBundleDisplayName: 流映
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.entertainment
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: true
+        INFOPLIST_KEY_UILaunchScreen_Generation: true
+        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: true
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: false
+    scheme:
+      gatherCoverageData: false
