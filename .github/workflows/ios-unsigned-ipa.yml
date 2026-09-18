@@ -1,0 +1,92 @@
+name: Build UNSIGNED IPA (LiveContainer)
+
+# 产出完全未签名的 IPA，专供 LiveContainer / SideStore / AltStore 导入。
+# 不需要配置任何 Secrets。
+#
+# 触发方式：
+#   1) Actions 页面手动 Run workflow
+#   2) 推送 v* 标签（会额外附加到 Release，方便手机直接下载）
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: "Bundle Identifier（留空用默认 com.tico.FlowBox）"
+        required: false
+        default: "com.tico.FlowBox"
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      BUNDLE_ID: ${{ github.event.inputs.bundle_id || 'com.tico.FlowBox' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "latest-stable"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (no codesign)
+        run: |
+          set -euxo pipefail
+          xcodebuild build \
+            -project FlowBox.xcodeproj \
+            -scheme FlowBox \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            -destination "generic/platform=iOS" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            ONLY_ACTIVE_ARCH=NO
+
+      - name: Package unsigned IPA
+        run: |
+          set -euxo pipefail
+          APP=$(find "$RUNNER_TEMP/dd/Build/Products" -name "FlowBox.app" -type d -print -quit)
+          test -n "$APP"
+
+          # LiveContainer 需要可执行文件保持未签名；顺便清掉 _CodeSignature
+          rm -rf "$APP/_CodeSignature" "$APP/embedded.mobileprovision"
+
+          # 校验：确认主二进制确实未签名
+          if codesign -dv "$APP/FlowBox" 2>&1 | grep -q "Signature="; then
+            echo "::warning::主二进制仍带签名，尝试移除"
+            codesign --remove-signature "$APP/FlowBox" || true
+          fi
+
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          zip -qry FlowBox-unsigned.ipa Payload
+          shasum -a 256 FlowBox-unsigned.ipa
+          ls -lh FlowBox-unsigned.ipa
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowBox-unsigned-ipa
+          path: ${{ runner.temp }}/FlowBox-unsigned.ipa
+
+      - name: Publish to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ runner.temp }}/FlowBox-unsigned.ipa
+          generate_release_notes: true
