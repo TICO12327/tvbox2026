@@ -45,17 +45,13 @@ actor NodeRuntime {
         }
 
         if !FBNodeRunner.isRunning() {
-            let didStart: Bool
             do {
                 // NSError** is imported by Swift as a throwing method, so the
                 // bridge's failure is surfaced here without an extra error
                 // argument at the call site.
-                didStart = try FBNodeRunner.start(withScriptPath: scriptURL.path, port: port)
+                try FBNodeRunner.start(withScriptPath: scriptURL.path, port: port)
             } catch {
                 throw NodeRuntimeError.launchFailed(error.localizedDescription)
-            }
-            guard didStart else {
-                throw NodeRuntimeError.launchFailed("未知错误")
             }
         }
 
