@@ -7,6 +7,8 @@
 - 原生 SwiftUI，iOS 16+
 - 首页、搜索、源管理、设置四个移动端页面
 - 远程 M3U / M3U8、TXT、通用 JSON 解析
+- TVBox / PeekPro 配置识别，支持 `sites`、`lives` 和常见直连 API
+- `.md5` 旁车校验识别：可定位并校验对应的 `index.js`
 - 收藏、观看历史、断点记录的本机持久化
 - AVKit 播放 HTTP / HTTPS 视频地址
 - 深色玻璃卡片风格，适合手机单手操作
@@ -48,6 +50,12 @@ base64 -i profile.mobileprovision | pbcopy
 不要把 `.p12`、私钥、描述文件、API Token 或账号会话内容提交到仓库。IPA 的安装仍受描述文件设备列表、证书有效期和 Apple 签名规则限制。
 
 为兼容一部分仍使用 HTTP 的个人媒体源，构建配置启用了网络明文兼容选项。请优先使用 HTTPS，并只添加可信地址。
+
+### TVBox / PeekPro 兼容范围
+
+选择“TVBox / PeekPro”格式，或保持“自动识别”。FlowBox 会识别常见的 `sites`、`lives`、`parses` 配置，读取直播频道，并尝试访问使用 HTTP/HTTPS API 的站点。
+
+带有 `jar`、`spider`、JavaScript `api` 或 `index.js` 的站点属于 NodeJS spider，需要 Node 运行时和本地代理。当前 Swift 原生版本会识别这类源、校验 `.md5` 旁车文件并给出明确提示，但不会在应用内执行不受信任的远程 NodeJS 代码。请优先使用你有权访问的直接 JSON/M3U 接口；如要完整兼容 NodeJS spider，需要另外集成经过审计的移动端 Node 运行时。
 
 ## 发布
 
