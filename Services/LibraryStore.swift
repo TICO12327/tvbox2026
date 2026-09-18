@@ -65,7 +65,14 @@ final class LibraryStore: ObservableObject {
             guard (response as? HTTPURLResponse)?.statusCode ?? 500 < 400 else {
                 throw URLError(.badServerResponse)
             }
-            let parsed = try SourceParser.parse(data: data, source: source)
+            let parsed: [MediaItem]
+            if source.format == .tvbox
+                || ["md5", "js"].contains(url.pathExtension.lowercased())
+                || TVBoxService.isLikelyConfiguration(data) {
+                parsed = try await TVBoxService.load(data: data, sourceURL: url, sourceID: source.id)
+            } else {
+                parsed = try SourceParser.parse(data: data, source: source)
+            }
             items.removeAll { $0.sourceID == source.id }
             items.append(contentsOf: parsed)
             if let index = sources.firstIndex(where: { $0.id == source.id }) {

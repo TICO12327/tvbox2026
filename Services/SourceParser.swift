@@ -37,6 +37,8 @@ struct SourceParser {
             entries = parseTXT(text)
         case .json:
             entries = parseJSON(data)
+        case .tvbox:
+            entries = parseTVBox(data)
         case .auto:
             entries = []
         }
@@ -62,14 +64,34 @@ struct SourceParser {
         if source.format != .auto { return source.format }
         let lower = text.lowercased()
         if lower.contains("#extm3u") || lower.contains("#extinf") { return .m3u }
+        if let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+           object["sites"] != nil || object["lives"] != nil || object["parses"] != nil {
+            return .tvbox
+        }
         if let first = text.trimmingCharacters(in: .whitespacesAndNewlines).first {
             if first == "{" || first == "[" { return .json }
         }
+        if ["md5", "js"].contains(source.url?.pathExtension.lowercased()) { return .tvbox }
         if source.url?.pathExtension.lowercased() == "json" { return .json }
         if source.url?.pathExtension.lowercased() == "m3u" || source.url?.pathExtension.lowercased() == "m3u8" {
             return .m3u
         }
         return .txt
+    }
+
+    private static func parseTVBox(_ data: Data) -> [Entry] {
+        guard let configuration = try? TVBoxService.parseConfiguration(data: data, sourceID: UUID()) else { return [] }
+        return configuration.liveItems.compactMap { item in
+            guard let url = item.playbackURL else { return nil }
+            return Entry(
+                title: item.title,
+                subtitle: item.subtitle,
+                category: item.category,
+                artworkURL: item.artworkURL,
+                playbackURL: url,
+                kind: .live
+            )
+        }
     }
 
     private static func parseM3U(_ text: String) -> [Entry] {
