@@ -30,8 +30,13 @@ jobs:
           rm -rf "$RUNNER_TEMP/nodejs-mobile-ios" Vendor/NodeMobile.framework
           mkdir -p "$RUNNER_TEMP/nodejs-mobile-ios"
           unzip -q "$RUNNER_TEMP/nodejs-mobile-ios.zip" -d "$RUNNER_TEMP/nodejs-mobile-ios"
-          NODE_FRAMEWORK=$(find "$RUNNER_TEMP/nodejs-mobile-ios" -type d -name NodeMobile.framework -print -quit)
-          test -n "$NODE_FRAMEWORK"
+          NODE_XCFRAMEWORK=$(find "$RUNNER_TEMP/nodejs-mobile-ios" -type d -name NodeMobile.xcframework -print -quit)
+          test -n "$NODE_XCFRAMEWORK"
+          # The archive contains separate device and simulator slices. The
+          # first framework found by find is the simulator slice, which
+          # cannot be linked into a real-device IPA.
+          NODE_FRAMEWORK="$NODE_XCFRAMEWORK/ios-arm64/NodeMobile.framework"
+          test -f "$NODE_FRAMEWORK/NodeMobile"
           cp -R "$NODE_FRAMEWORK" Vendor/NodeMobile.framework
 
       - name: Generate Xcode project
