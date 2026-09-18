@@ -75,11 +75,13 @@ enum TVBoxService {
             guard expected == actual else {
                 throw TVBoxServiceError.javascriptRuntimeRequired(detail: "index.js 校验值不一致")
             }
-            throw TVBoxServiceError.javascriptRuntimeRequired(detail: "已找到并校验 index.js（\(scriptData.count / 1_000_000) MB）")
+            let baseURL = try await NodeRuntime.shared.start(scriptData: scriptData, cacheKey: actual)
+            return try await loadNodeSpiderItems(baseURL: baseURL, sourceID: sourceID)
         }
 
         if url.pathExtension.lowercased() == "js" || looksLikeJavaScript(text) {
-            throw TVBoxServiceError.javascriptRuntimeRequired(detail: "源文件是 JavaScript 程序，不是普通 JSON 列表")
+            let baseURL = try await NodeRuntime.shared.start(scriptData: data, cacheKey: md5(data))
+            return try await loadNodeSpiderItems(baseURL: baseURL, sourceID: sourceID)
         }
 
         let configuration = try parseConfiguration(data: data, sourceID: sourceID)
@@ -107,6 +109,206 @@ enum TVBoxService {
         }
         guard !items.isEmpty else { throw TVBoxServiceError.noPlayableItems }
         return deduplicated(items)
+    }
+
+    private static func loadNodeSpiderItems(baseURL: URL, sourceID: UUID) async throws -> [MediaItem] {
+        guard let config = try? await nodeRequest(baseURL.appendingPathComponent("config")),
+              let root = config as? [String: Any],
+              let video = root["video"] as? [String: Any] else {
+            throw NodeRuntimeError.invalidResponse
+        }
+
+        let rawSites: [Any]
+        if let sites = video["sites"] as? [Any] {
+            rawSites = sites
+        } else if let sites = video["sites"] as? [[String: Any]] {
+            rawSites = sites
+        } else {
+            rawSites = []
+        }
+
+        let sites = rawSites.compactMap { raw -> (name: String, api: URL)? in
+            guard let dictionary = raw as? [String: Any],
+                  let apiString = firstString(in: dictionary, keys: ["api", "url"]) else { return nil }
+            let name = firstString(in: dictionary, keys: ["name", "title", "key"]) ?? "TVBox 站点"
+            guard let api = URL(string: apiString, relativeTo: baseURL)?.absoluteURL else { return nil }
+            return (name, api)
+        }
+
+        guard !sites.isEmpty else { throw TVBoxServiceError.noPlayableItems }
+
+        // A large CatVod bundle can expose many optional spiders. Loading a
+        // bounded first page keeps a phone responsive while still showing a
+        // useful catalog; failed providers are intentionally skipped.
+        let selectedSites = Array(sites.prefix(24))
+        var siteResults = Array(repeating: [MediaItem](), count: selectedSites.count)
+        await withTaskGroup(of: (Int, [MediaItem]).self) { group in
+            for (index, site) in selectedSites.enumerated() {
+                group.addTask {
+                    let result = (try? await fetchNodeSite(site, baseURL: baseURL, sourceID: sourceID)) ?? []
+                    return (index, result)
+                }
+            }
+            for await (index, result) in group {
+                siteResults[index] = result
+            }
+        }
+
+        let items = deduplicated(siteResults.flatMap { $0 })
+        guard !items.isEmpty else { throw TVBoxServiceError.noPlayableItems }
+        return items
+    }
+
+    private static func fetchNodeSite(
+        _ site: (name: String, api: URL),
+        baseURL: URL,
+        sourceID: UUID
+    ) async throws -> [MediaItem] {
+        guard let home = try? await nodeRequest(site.api.appendingPathComponent("home"), body: [:]) else {
+            return []
+        }
+
+        var dictionaries = catalogDictionaries(from: home)
+        if dictionaries.isEmpty, let homeRoot = home as? [String: Any],
+           let classes = homeRoot["class"] as? [Any] {
+            // Some spiders expose only categories on /home. Ask for the first
+            // two categories as a fallback.
+            for category in classes.compactMap({ $0 as? [String: Any] }).prefix(2) {
+                guard let categoryID = firstString(in: category, keys: ["type_id", "id"]) else { continue }
+                let payload: [String: Any] = ["id": categoryID, "page": 1, "filters": [:]]
+                if let response = try? await nodeRequest(site.api.appendingPathComponent("category"), body: payload) {
+                    dictionaries.append(contentsOf: catalogDictionaries(from: response))
+                }
+            }
+        }
+
+        var items: [MediaItem] = []
+        for raw in dictionaries.prefix(8) {
+            let title = firstString(in: raw, keys: titleKeys) ?? "未命名项目"
+            let category = firstString(in: raw, keys: ["type_name", "category", "group", "type"]) ?? site.name
+            let artwork = firstString(in: raw, keys: artworkKeys).flatMap { resolve($0, relativeTo: site.api) }
+            let id = firstString(in: raw, keys: ["vod_id", "id", "videoId"])
+            var playback = firstPlayableURL(in: raw, relativeTo: site.api)
+
+            if playback == nil, let id {
+                if let detail = try? await nodeRequest(
+                    site.api.appendingPathComponent("detail"),
+                    body: ["id": id]
+                ), let detailRaw = catalogDictionaries(from: detail).first {
+                    playback = firstPlayableURL(in: detailRaw, relativeTo: site.api)
+                    if playback == nil {
+                        playback = try? await fetchNodePlay(
+                            detail: detailRaw,
+                            fallbackID: id,
+                            siteURL: site.api
+                        )
+                    }
+                }
+            }
+
+            items.append(MediaItem(
+                title: title,
+                subtitle: site.name,
+                category: category,
+                artworkURL: artwork,
+                playbackURL: playback,
+                sourceID: sourceID,
+                kind: .movie
+            ))
+        }
+        return items
+    }
+
+    private static func fetchNodePlay(
+        detail: [String: Any],
+        fallbackID: String,
+        siteURL: URL
+    ) async throws -> String? {
+        let id = firstPlayToken(in: detail, fallback: fallbackID)
+        let flag = firstString(in: detail, keys: ["vod_play_from", "flag"])?.components(separatedBy: "$$$").first ?? ""
+        let payload: [String: Any] = ["flag": flag, "id": id, "vipFlags": []]
+        let response = try await nodeRequest(siteURL.appendingPathComponent("play"), body: payload)
+        return firstHTTPURL(in: response, relativeTo: siteURL)
+    }
+
+    private static func nodeRequest(_ url: URL, body: [String: Any]? = nil) async throws -> Any {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 18
+        request.setValue("FlowBox/1.1 NodeSpider", forHTTPHeaderField: "User-Agent")
+        if let body {
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
+            throw TVBoxServiceError.remoteStatus((response as? HTTPURLResponse)?.statusCode ?? 500)
+        }
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    private static func firstPlayableURL(in dictionary: [String: Any], relativeTo baseURL: URL) -> String? {
+        for key in ["url", "playUrl", "play_url", "streamUrl", "stream_url", "address", "vod_play_url"] {
+            guard let value = dictionary[key] else { continue }
+            for candidate in candidateStrings(from: value) {
+                if let resolved = resolve(candidate, relativeTo: baseURL), isHTTPURL(resolved) {
+                    return resolved
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func firstHTTPURL(in object: Any, relativeTo baseURL: URL) -> String? {
+        if let string = object as? String {
+            for candidate in candidateStrings(from: string) {
+                if let resolved = resolve(candidate, relativeTo: baseURL), isHTTPURL(resolved) {
+                    return resolved
+                }
+            }
+            return nil
+        }
+        if let dictionary = object as? [String: Any] {
+            for key in ["url", "playUrl", "play_url", "streamUrl", "stream_url", "link"] {
+                if let value = dictionary[key], let result = firstHTTPURL(in: value, relativeTo: baseURL) {
+                    return result
+                }
+            }
+            for value in dictionary.values {
+                if let result = firstHTTPURL(in: value, relativeTo: baseURL) { return result }
+            }
+        } else if let array = object as? [Any] {
+            for value in array {
+                if let result = firstHTTPURL(in: value, relativeTo: baseURL) { return result }
+            }
+        }
+        return nil
+    }
+
+    private static func firstPlayToken(in dictionary: [String: Any], fallback: String) -> String {
+        for key in ["vod_play_url", "playUrl", "play_url", "url", "id"] {
+            guard let value = dictionary[key] else { continue }
+            if let candidate = candidateStrings(from: value).first, !candidate.isEmpty { return candidate }
+        }
+        return fallback
+    }
+
+    private static func candidateStrings(from value: Any) -> [String] {
+        if let string = value as? String {
+            return string
+                .replacingOccurrences(of: "$$$", with: "#")
+                .split(separator: "#")
+                .map(String.init)
+                .map { segment in
+                    guard let separator = segment.lastIndex(of: "$") else { return segment }
+                    return String(segment[segment.index(after: separator)...])
+                }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        if let strings = value as? [String] { return strings }
+        if let values = value as? [Any] { return values.compactMap { $0 as? String } }
+        return []
     }
 
     static func isLikelyConfiguration(_ data: Data) -> Bool {
