@@ -47,6 +47,7 @@ enum SourceFormat: String, Codable, CaseIterable {
     case m3u
     case json
     case txt
+    case tvbox
 
     var label: String {
         switch self {
@@ -54,6 +55,7 @@ enum SourceFormat: String, Codable, CaseIterable {
         case .m3u: return "M3U / M3U8"
         case .json: return "JSON"
         case .txt: return "TXT"
+        case .tvbox: return "TVBox / PeekPro"
         }
     }
 }
@@ -71,7 +73,7 @@ enum DemoCatalog {
         ),
         MediaItem(
             title: "添加你自己的内容源",
-            subtitle: "支持 M3U、TXT 和通用 JSON",
+            subtitle: "支持 M3U、TXT、JSON 和 TVBox 配置",
             category: "入门",
             artworkURL: nil,
             playbackURL: nil,
