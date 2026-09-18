@@ -33,8 +33,8 @@ jobs:
           NODE_XCFRAMEWORK=$(find "$RUNNER_TEMP/nodejs-mobile-ios" -type d -name NodeMobile.xcframework -print -quit)
           test -n "$NODE_XCFRAMEWORK"
           # The archive contains separate device and simulator slices. The
-          # first framework found by find is the simulator slice, which
-          # cannot be linked into a real-device IPA.
+          # first framework found by `find` is the simulator slice, which
+          # cannot be linked into a real-device IPA. Select ios-arm64.
           NODE_FRAMEWORK="$NODE_XCFRAMEWORK/ios-arm64/NodeMobile.framework"
           test -f "$NODE_FRAMEWORK/NodeMobile"
           cp -R "$NODE_FRAMEWORK" Vendor/NodeMobile.framework
@@ -58,12 +58,21 @@ jobs:
         run: |
           APP_PATH="$RUNNER_TEMP/FlowBox-unsigned.xcarchive/Products/Applications/FlowBox.app"
           test -d "$APP_PATH"
+          # Unsigned archives can skip Xcode's embed-framework phase. Ensure
+          # the 52 MB NodeMobile runtime is present before packaging.
+          mkdir -p "$APP_PATH/Frameworks"
+          rm -rf "$APP_PATH/Frameworks/NodeMobile.framework"
+          cp -R Vendor/NodeMobile.framework "$APP_PATH/Frameworks/NodeMobile.framework"
+          test -f "$APP_PATH/Frameworks/NodeMobile.framework/NodeMobile"
           mkdir -p "$RUNNER_TEMP/unsigned-payload"
           rm -rf "$RUNNER_TEMP/unsigned-payload/Payload"
           mkdir "$RUNNER_TEMP/unsigned-payload/Payload"
           cp -R "$APP_PATH" "$RUNNER_TEMP/unsigned-payload/Payload/FlowBox.app"
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
-            "$RUNNER_TEMP/unsigned-payload" "$RUNNER_TEMP/FlowBox-unsigned.ipa"
+            "$RUNNER_TEMP/unsigned-payload/Payload" "$RUNNER_TEMP/FlowBox-unsigned.ipa"
+          unzip -l "$RUNNER_TEMP/FlowBox-unsigned.ipa" | \
+            grep -q "Payload/FlowBox.app/Frameworks/NodeMobile.framework/NodeMobile"
+          du -h "$RUNNER_TEMP/FlowBox-unsigned.ipa"
           shasum -a 256 "$RUNNER_TEMP/FlowBox-unsigned.ipa"
 
       - name: Upload unsigned IPA artifact
