@@ -21,10 +21,73 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Download NodeMobile framework
+        run: |
+          mkdir -p Vendor
+          curl --fail --location --retry 3 \
+            "https://github.com/nodejs-mobile/nodejs-mobile/releases/download/v18.17.3/nodejs-mobile-v18.17.3-ios.zip" \
+            --output "$RUNNER_TEMP/nodejs-mobile-ios.zip"
+          rm -rf "$RUNNER_TEMP/nodejs-mobile-ios" Vendor/NodeMobile.framework
+          mkdir -p "$RUNNER_TEMP/nodejs-mobile-ios"
+          unzip -q "$RUNNER_TEMP/nodejs-mobile-ios.zip" -d "$RUNNER_TEMP/nodejs-mobile-ios"
+          NODE_FRAMEWORK=$(find "$RUNNER_TEMP/nodejs-mobile-ios" -type d -name NodeMobile.framework -print -quit)
+          test -n "$NODE_FRAMEWORK"
+          cp -R "$NODE_FRAMEWORK" Vendor/NodeMobile.framework
+
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Archive unsigned app
+        run: |
+          xcodebuild archive \
+            -project FlowBox.xcodeproj \
+            -scheme FlowBox \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/FlowBox-unsigned.xcarchive" \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="$RUNNER_TEMP/FlowBox-unsigned.xcarchive/Products/Applications/FlowBox.app"
+          test -d "$APP_PATH"
+          mkdir -p "$RUNNER_TEMP/unsigned-payload"
+          rm -rf "$RUNNER_TEMP/unsigned-payload/Payload"
+          mkdir "$RUNNER_TEMP/unsigned-payload/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/unsigned-payload/Payload/FlowBox.app"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/unsigned-payload" "$RUNNER_TEMP/FlowBox-unsigned.ipa"
+          shasum -a 256 "$RUNNER_TEMP/FlowBox-unsigned.ipa"
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowBox-unsigned-ipa
+          path: ${{ runner.temp }}/FlowBox-unsigned.ipa
+
+      - name: Check signing configuration
+        id: signing
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          PROFILE_NAME: ${{ secrets.IOS_PROFILE_NAME }}
+          SIGNING_IDENTITY: ${{ secrets.IOS_SIGNING_IDENTITY }}
+        run: |
+          if [ -n "$CERTIFICATE_BASE64" ] && [ -n "$CERTIFICATE_PASSWORD" ] && \
+             [ -n "$PROFILE_BASE64" ] && [ -n "$KEYCHAIN_PASSWORD" ] && \
+             [ -n "$TEAM_ID" ] && [ -n "$PROFILE_NAME" ] && [ -n "$SIGNING_IDENTITY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install signing certificate and profile
+        if: steps.signing.outputs.configured == 'true'
         env:
           CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
           CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
@@ -45,7 +108,8 @@ jobs:
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/flowbox.mobileprovision"
 
-      - name: Archive
+      - name: Archive signed app
+        if: steps.signing.outputs.configured == 'true'
         env:
           TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
           PROFILE_NAME: ${{ secrets.IOS_PROFILE_NAME }}
@@ -64,7 +128,8 @@ jobs:
             PRODUCT_BUNDLE_IDENTIFIER=com.tico.FlowBox \
             -allowProvisioningUpdates
 
-      - name: Export IPA
+      - name: Export signed IPA
+        if: steps.signing.outputs.configured == 'true'
         env:
           TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
           PROFILE_NAME: ${{ secrets.IOS_PROFILE_NAME }}
@@ -88,20 +153,22 @@ jobs:
             -exportPath "$RUNNER_TEMP/export" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
 
-      - name: Verify IPA
+      - name: Verify signed IPA
+        if: steps.signing.outputs.configured == 'true'
         run: |
           IPA=$(find "$RUNNER_TEMP/export" -name "*.ipa" -print -quit)
           test -n "$IPA"
           shasum -a 256 "$IPA"
 
-      - name: Upload IPA artifact
+      - name: Upload signed IPA artifact
+        if: steps.signing.outputs.configured == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: FlowBox-ipa
           path: ${{ runner.temp }}/export/*.ipa
 
-      - name: Publish GitHub release asset
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish signed GitHub release asset
+        if: startsWith(github.ref, 'refs/tags/') && steps.signing.outputs.configured == 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ runner.temp }}/export/*.ipa
