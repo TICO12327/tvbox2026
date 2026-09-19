@@ -38,7 +38,7 @@ struct SourceParser {
         case .json:
             entries = parseJSON(data)
         case .tvbox:
-            entries = parseTVBox(data)
+            entries = parseTVBox(data, sourceID: source.id)
         case .auto:
             entries = []
         }
@@ -79,8 +79,8 @@ struct SourceParser {
         return .txt
     }
 
-    private static func parseTVBox(_ data: Data) -> [Entry] {
-        guard let configuration = try? TVBoxService.parseConfiguration(data: data, sourceID: UUID()) else { return [] }
+    private static func parseTVBox(_ data: Data, sourceID: UUID) -> [Entry] {
+        guard let configuration = try? TVBoxService.parseConfiguration(data: data, sourceID: sourceID) else { return [] }
         return configuration.liveItems.compactMap { item in
             guard let url = item.playbackURL else { return nil }
             return Entry(

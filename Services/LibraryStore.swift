@@ -74,8 +74,20 @@ final class LibraryStore: ObservableObject {
             } else {
                 parsed = try SourceParser.parse(data: data, source: source)
             }
+
+            // 归属兜底：任何解析路径漏设 sourceID 都会让下面的 removeAll 失效，
+            // 导致旧条目反复堆积、persist() 体积失控而崩溃。这里强制回填。
+            let normalized = parsed.map { item -> MediaItem in
+                var copy = item
+                if copy.sourceID != source.id { copy.sourceID = source.id }
+                return copy
+            }
+            let unique = Self.deduplicated(normalized)
+
+            // 只保留本次刷新结果，避免历史条目无限累积。
             items.removeAll { $0.sourceID == source.id }
-            items.append(contentsOf: parsed)
+            items.append(contentsOf: unique)
+
             if let index = sources.firstIndex(where: { $0.id == source.id }) {
                 sources[index].lastUpdated = Date()
             }
@@ -86,6 +98,20 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    /// 按标题 + 播放地址去重，防止同一源在多次刷新后重复堆积。
+    private static func deduplicated(_ items: [MediaItem]) -> [MediaItem] {
+        var seen = Set<String>()
+        var result: [MediaItem] = []
+        result.reserveCapacity(items.count)
+        for item in items {
+            let key = item.title + "\u{1}" + (item.playbackURL ?? "")
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            result.append(item)
+        }
+        return result
+    }
+
     private func update(_ item: MediaItem, mutation: (inout MediaItem) -> Void) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         mutation(&items[index])
@@ -94,19 +120,35 @@ final class LibraryStore: ObservableObject {
 
     private func load() {
         let defaults = UserDefaults.standard
-        if let data = defaults.data(forKey: itemsKey), let saved = try? JSONDecoder().decode([MediaItem].self, from: data) {
+        // 旧版本可能写入了超量数据；解码失败时回退到演示数据，
+        // 而不是让半损坏的 items 数组进入后续刷新流程。
+        if let data = defaults.data(forKey: itemsKey),
+           let saved = try? JSONDecoder().decode([MediaItem].self, from: data),
+           saved.count <= Self.maxPersistedItems {
             items = saved
         } else {
+            defaults.removeObject(forKey: itemsKey)
             items = DemoCatalog.items
         }
         if let data = defaults.data(forKey: sourcesKey), let saved = try? JSONDecoder().decode([MediaSource].self, from: data) {
             sources = saved
+        } else {
+            defaults.removeObject(forKey: sourcesKey)
+            sources = []
         }
     }
 
     private func persist() {
         let encoder = JSONEncoder()
-        if let itemData = try? encoder.encode(items) { UserDefaults.standard.set(itemData, forKey: itemsKey) }
+        // UserDefaults 不适合存放超大 JSON。限制条目总量，避免源刷新后
+        // 数据体量失控导致写入/解码失败（表现为刷新时闪退）。
+        let capped = Array(items.prefix(Self.maxPersistedItems))
+        if capped.count != items.count {
+            items = capped
+        }
+        if let itemData = try? encoder.encode(capped) { UserDefaults.standard.set(itemData, forKey: itemsKey) }
         if let sourceData = try? encoder.encode(sources) { UserDefaults.standard.set(sourceData, forKey: sourcesKey) }
     }
+
+    private static let maxPersistedItems = 1500
 }

@@ -64,6 +64,39 @@ jobs:
           rm -rf "$APP_PATH/Frameworks/NodeMobile.framework"
           cp -R Vendor/NodeMobile.framework "$APP_PATH/Frameworks/NodeMobile.framework"
           test -f "$APP_PATH/Frameworks/NodeMobile.framework/NodeMobile"
+
+          # ------------------------------------------------------------------
+          # 关键修复：GENERATE_INFOPLIST_FILE + INFOPLIST_KEY_* 无法表达嵌套字典，
+          # 所以 NSAppTransportSecurity 从未写入 plist，导致所有 http:// 明文源
+          # 被 iOS 直接拒绝（刷新 JSON 源闪退的根因）。这里在打包前直接补写。
+          # ------------------------------------------------------------------
+          PLIST="$APP_PATH/Info.plist"
+          PB=/usr/libexec/PlistBuddy
+
+          # 1) 允许明文 HTTP（M3U / TVBox / JSON 源大多仍是 http）
+          $PB -c "Add :NSAppTransportSecurity dict" "$PLIST" 2>/dev/null \
+            || $PB -c "Delete :NSAppTransportSecurity" "$PLIST"
+          $PB -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$PLIST" 2>/dev/null \
+            || $PB -c "Set :NSAppTransportSecurity:NSAllowsArbitraryLoads true" "$PLIST"
+          $PB -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoadsInWebContent bool true" "$PLIST" 2>/dev/null || true
+          $PB -c "Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true" "$PLIST" 2>/dev/null || true
+
+          # 2) Speech.framework 在部分系统版本会校验麦克风描述，缺失会直接 terminate
+          $PB -c "Add :NSMicrophoneUsageDescription string 用于采集直播音频以生成实时字幕，不会上传录音" "$PLIST" 2>/dev/null \
+            || $PB -c "Set :NSMicrophoneUsageDescription 用于采集直播音频以生成实时字幕，不会上传录音" "$PLIST"
+
+          # 3) 语音识别描述（project.yml 已声明，这里兜底）
+          $PB -c "Add :NSSpeechRecognitionUsageDescription string 用于将直播音频识别为文字并生成中文字幕" "$PLIST" 2>/dev/null \
+            || $PB -c "Set :NSSpeechRecognitionUsageDescription 用于将直播音频识别为文字并生成中文字幕" "$PLIST"
+
+          # 4) 后台音频（直播播放切后台不被挂起）
+          $PB -c "Add :UIBackgroundModes array" "$PLIST" 2>/dev/null || true
+          $PB -c "Add :UIBackgroundModes:0 string audio" "$PLIST" 2>/dev/null || true
+
+          plutil -lint "$PLIST"
+          echo "--- 修复后的关键权限 ---"
+          $PB -c "Print :NSAppTransportSecurity" "$PLIST"
+          $PB -c "Print :NSMicrophoneUsageDescription" "$PLIST"
           mkdir -p "$RUNNER_TEMP/unsigned-payload"
           rm -rf "$RUNNER_TEMP/unsigned-payload/Payload"
           mkdir "$RUNNER_TEMP/unsigned-payload/Payload"
