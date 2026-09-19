@@ -7,6 +7,9 @@ name: Build UNSIGNED IPA (LiveContainer)
 #   1) Actions 页面手动 Run workflow
 #   2) 推送 v* 标签（会额外附加到 Release，方便手机直接下载）
 
+# 注意：本工作流不下载 Vendor/NodeMobile.framework，而当前代码依赖它，
+# 因此构建会失败。请使用 .github/workflows/ios-ipa.yml（它会先下载 NodeMobile）。
+# 这里仅保留手动触发，避免每次打 tag 都产生一条失败记录。
 on:
   workflow_dispatch:
     inputs:
@@ -14,9 +17,6 @@ on:
         description: "Bundle Identifier（留空用默认 com.tico.FlowBox）"
         required: false
         default: "com.tico.FlowBox"
-  push:
-    tags:
-      - "v*"
 
 jobs:
   build:
