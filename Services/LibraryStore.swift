@@ -50,6 +50,7 @@ final class LibraryStore: ObservableObject {
     }
 
     func refresh(_ source: MediaSource) async {
+        guard !isRefreshing else { return }
         guard let url = source.url else {
             lastError = "源地址无效"
             return

@@ -140,7 +140,11 @@ enum TVBoxService {
         // A large CatVod bundle can expose many optional spiders. Loading a
         // bounded first page keeps a phone responsive while still showing a
         // useful catalog; failed providers are intentionally skipped.
-        let selectedSites = Array(sites.prefix(24))
+        // The reference client keeps the Node service alive and loads sites
+        // from its interface on demand. Do not fan out every provider during
+        // one refresh on a phone; cold-starting a large bundle plus 24 sites
+        // can exhaust the embedded Node event loop before the first response.
+        let selectedSites = Array(sites.prefix(6))
         var siteResults = Array(repeating: [MediaItem](), count: selectedSites.count)
         await withTaskGroup(of: (Int, [MediaItem]).self) { group in
             for (index, site) in selectedSites.enumerated() {
