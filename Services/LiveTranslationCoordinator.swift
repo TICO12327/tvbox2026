@@ -1,179 +1,137 @@
-import AVFoundation
-import Speech
+import Foundation
 
+/// 直播字幕流水线：音频 tap → 分片 → 转录+翻译 → 字幕。
+///
+/// 相比旧实现的关键改动：
+/// - 不再使用 Apple Speech。旧方案依赖 `SFSpeechRecognizer` 的短生命周期任务，
+///   对无限长的直播流不适用（配额 + 上下文丢失）。
+/// - 请求改为**串行队列**而不是「每次新结果就取消上一个」。旧实现里
+///   每个 partial 结果都会 cancel 掉正在进行的翻译请求，导致请求永远跑不完。
+/// - 分片固定时长，保证每次请求都能完整跑完并回到主线程更新字幕。
 @MainActor
 final class LiveTranslationCoordinator {
+    private let asr: LiveASRService
     private let sourceLanguage: String
-    private let translator: DeepSeekTranslator
+    private let targetLanguageName: String
+    private let chunker: AudioChunker
 
-    private var recognizer: SFSpeechRecognizer?
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
-    private var translationTask: Task<Void, Never>?
+    /// 串行执行转录请求，保证同一时刻只有一个在飞。
+    private var isProcessing = false
+    private var pendingChunks: [Data] = []
+    private let maxPendingChunks = 3
+
     private var isRunning = false
-    private var receivedSeconds = 0.0
-    private var lastScheduledText = ""
+    private var lastTranslation = ""
+    private var contextLine = ""
 
     var onSubtitle: ((String) -> Void)?
     var onStatus: ((String?) -> Void)?
 
-    init(sourceLanguage: String, apiKey: String) {
+    /// 是否已配置 API Key。UI 用它决定是否显示「请先填写 Key」。
+    var hasAPIKey: Bool { asr.isConfigured }
+
+    init(
+        apiKey: String,
+        sourceLanguage: String,
+        targetLanguageName: String,
+        chunkSeconds: Double = 5.0,
+        model: String = "whisper-1",
+        endpoint: URL? = nil
+    ) {
+        self.asr = LiveASRService(
+            apiKey: apiKey,
+            model: model,
+            endpoint: endpoint ?? URL(string: "https://api.openai.com/v1/audio/transcriptions")!
+        )
         self.sourceLanguage = sourceLanguage
-        self.translator = DeepSeekTranslator(apiKey: apiKey)
-        self.recognizer = SFSpeechRecognizer(locale: Locale(identifier: sourceLanguage))
+        self.targetLanguageName = targetLanguageName
+        self.chunker = AudioChunker(chunkSeconds: chunkSeconds)
+
+        chunker.onChunk = { [weak self] wav in
+            Task { @MainActor [weak self] in
+                self?.enqueue(wav)
+            }
+        }
     }
 
-    func start() async {
+    func start() {
         guard !isRunning else { return }
+        guard asr.isConfigured else {
+            publishStatus("请先在设置中填写 OpenAI API Key")
+            return
+        }
         isRunning = true
-
-        guard translator.isConfigured else {
-            isRunning = false
-            publishStatus("请先在设置中填写 DeepSeek API Key")
-            return
-        }
-
-        let authorization = await requestAuthorization()
-        guard authorization == .authorized else {
-            isRunning = false
-            publishStatus(authorization == .denied ? "请在系统设置允许语音识别" : "语音识别权限不可用")
-            return
-        }
-        guard let recognizer else {
-            isRunning = false
-            publishStatus("当前语言不支持语音识别")
-            return
-        }
-        guard recognizer.isAvailable else {
-            isRunning = false
-            publishStatus("语音识别服务暂不可用")
-            return
-        }
-
-        startRecognitionRequest()
-    }
-
-    func appendPCM(_ data: Data, sampleRate: Double) {
-        guard isRunning, !data.isEmpty else { return }
-        guard let request = recognitionRequest else { return }
-
-        let bytesPerSample = MemoryLayout<Float>.size
-        let frameCount = data.count / bytesPerSample
-        guard frameCount > 0,
-              let format = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: sampleRate,
-                channels: 1,
-                interleaved: false
-              ),
-              let buffer = AVAudioPCMBuffer(
-                pcmFormat: format,
-                frameCapacity: AVAudioFrameCount(frameCount)
-              ),
-              let channelData = buffer.floatChannelData?.pointee else {
-            return
-        }
-
-        buffer.frameLength = AVAudioFrameCount(frameCount)
-        data.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else { return }
-            memcpy(channelData, baseAddress, data.count)
-        }
-        request.append(buffer)
-
-        receivedSeconds += Double(frameCount) / sampleRate
-        // Apple Speech recognition sessions are short-lived. Restarting at a
-        // boundary keeps live streams working instead of waiting for a 60s task
-        // to fail with an opaque service error.
-        if receivedSeconds >= 45 {
-            startRecognitionRequest()
-        }
+        publishStatus("正在等待直播声音…")
     }
 
     func stop() {
+        guard isRunning else { return }
         isRunning = false
-        translationTask?.cancel()
-        translationTask = nil
-        recognitionRequest?.endAudio()
-        recognitionTask?.cancel()
-        recognitionRequest = nil
-        recognitionTask = nil
-        receivedSeconds = 0
-        lastScheduledText = ""
+        chunker.flush()
+        chunker.reset()
+        pendingChunks.removeAll()
         publishStatus(nil)
     }
 
-    private func requestAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
-        let current = SFSpeechRecognizer.authorizationStatus()
-        guard current == .notDetermined else { return current }
-        return await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
-                continuation.resume(returning: status)
-            }
-        }
+    /// 接收音频 tap 的 PCM（单声道 Float32）。
+    func appendPCM(_ samples: [Float], sampleRate: Double) {
+        guard isRunning else { return }
+        chunker.append(samples, sourceSampleRate: sampleRate)
     }
 
-    private func startRecognitionRequest() {
-        guard isRunning, let recognizer, recognizer.isAvailable else { return }
+    // MARK: - 请求队列
 
-        recognitionRequest?.endAudio()
-        recognitionTask?.cancel()
-        recognitionRequest = nil
-        recognitionTask = nil
-        receivedSeconds = 0
+    private func enqueue(_ wav: Data) {
+        guard isRunning else { return }
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.taskHint = .dictation
-        if #available(iOS 13.0, *) {
-            request.requiresOnDeviceRecognition = false
+        // 积压保护：网络跟不上时丢弃最旧的切片，保证字幕接近实时，
+        // 而不是越拖越久。这里刻意丢旧而不是丢新。
+        if pendingChunks.count >= maxPendingChunks {
+            pendingChunks.removeFirst()
         }
-        recognitionRequest = request
-        publishStatus("正在识别直播声音…")
-
-        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if let result {
-                    self.handleRecognition(result)
-                }
-                if let error, self.isRunning {
-                    self.publishStatus("语音识别暂时中断，正在重连…")
-                    if self.recognitionTask?.state == .completed || self.recognitionTask?.state == .finishing {
-                        self.startRecognitionRequest()
-                    }
-                    _ = error
-                }
-            }
-        }
+        pendingChunks.append(wav)
+        drainIfNeeded()
     }
 
-    private func handleRecognition(_ result: SFSpeechRecognitionResult) {
-        let text = result.bestTranscription.formattedString
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.count >= 2 else { return }
-        scheduleTranslation(for: text)
-    }
+    private func drainIfNeeded() {
+        guard isRunning, !isProcessing, !pendingChunks.isEmpty else { return }
+        let wav = pendingChunks.removeFirst()
+        isProcessing = true
 
-    private func scheduleTranslation(for text: String) {
-        guard text != lastScheduledText else { return }
-        lastScheduledText = text
-        translationTask?.cancel()
-        translationTask = Task { [weak self] in
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.finishProcessing() }
+
             do {
-                try await Task.sleep(nanoseconds: 500_000_000)
-                guard !Task.isCancelled, let self else { return }
-                let translated = try await self.translator.translate(text)
-                guard !Task.isCancelled else { return }
-                self.onSubtitle?(translated)
-                self.publishStatus("实时翻译已连接")
-            } catch is CancellationError {
-                return
+                let result = try await self.asr.transcribe(
+                    wavData: wav,
+                    sourceLanguage: self.sourceLanguage,
+                    targetLanguageName: self.targetLanguageName,
+                    context: self.contextLine
+                )
+
+                guard self.isRunning else { return }
+                let subtitle = result.translation.isEmpty ? result.transcript : result.translation
+                guard !subtitle.isEmpty else {
+                    self.publishStatus("正在监听…")
+                    return
+                }
+                guard subtitle != self.lastTranslation else { return }
+
+                self.lastTranslation = subtitle
+                self.contextLine = String(subtitle.suffix(120))
+                self.onSubtitle?(subtitle)
+                self.publishStatus(nil)
             } catch {
-                guard !Task.isCancelled else { return }
-                self?.publishStatus(error.localizedDescription)
+                guard self.isRunning else { return }
+                self.publishStatus(error.localizedDescription)
             }
         }
+    }
+
+    private func finishProcessing() {
+        isProcessing = false
+        drainIfNeeded()
     }
 
     private func publishStatus(_ status: String?) {

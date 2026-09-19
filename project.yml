@@ -32,7 +32,6 @@ targets:
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: true
         INFOPLIST_KEY_UILaunchScreen_Generation: true
         INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: true
-        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "用于将直播音频识别为文字并生成中文字幕"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: false
         SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/Runtime/FlowBox-Bridging-Header.h

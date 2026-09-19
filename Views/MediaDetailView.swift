@@ -76,12 +76,14 @@ struct PlayerView: View {
 
         let enabled = UserDefaults.standard.object(forKey: "flowbox.liveTranslation.enabled") as? Bool ?? false
         let sourceLanguage = UserDefaults.standard.string(forKey: "flowbox.liveTranslation.sourceLanguage") ?? "en-US"
-        let apiKey = KeychainStore.shared.value(forKey: "deepseek.apiKey") ?? ""
+        let targetLanguage = UserDefaults.standard.string(forKey: "flowbox.liveTranslation.targetLanguage") ?? "简体中文"
+        let apiKey = KeychainStore.shared.value(forKey: "openai.apiKey") ?? ""
         _playback = StateObject(wrappedValue: PlaybackController(
             url: url,
             isLive: item.isLive || item.kind == .live,
             translationEnabled: enabled,
             sourceLanguage: sourceLanguage,
+            targetLanguageName: targetLanguage,
             apiKey: apiKey
         ))
     }

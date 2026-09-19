@@ -10,7 +10,9 @@
 @property (nonatomic) UInt32 channelCount;
 @property (nonatomic) UInt32 bytesPerSample;
 @property (nonatomic) AudioFormatFlags formatFlags;
-@property (nonatomic) dispatch_queue_t deliveryQueue;
+@property (nonatomic, strong) dispatch_queue_t deliveryQueue;
+/// 复用的缓冲区，避免音频线程上反复分配内存（会造成爆音/丢帧）。
+@property (nonatomic, strong) NSMutableData *scratch;
 @end
 
 @implementation FBAudioTapContext
@@ -21,7 +23,7 @@ static FBAudioTapContext *FBContextForTap(MTAudioProcessingTapRef tap) {
 }
 
 static void FBTapInit(MTAudioProcessingTapRef tap, void *clientInfo, void **tapStorageOut) {
-    // clientInfo is retained with CFBridgingRetain before the tap is created.
+    // clientInfo 在创建 tap 之前已用 CFBridgingRetain 持有，这里直接移交所有权。
     *tapStorageOut = clientInfo;
 }
 
@@ -39,13 +41,26 @@ static void FBTapPrepare(
 ) {
     (void)maxFrames;
     FBAudioTapContext *context = FBContextForTap(tap);
+    if (context == nil || processingFormat == NULL) {
+        return;
+    }
     context.sampleRate = processingFormat->mSampleRate;
     context.channelCount = processingFormat->mChannelsPerFrame;
-    context.bytesPerSample = processingFormat->mBitsPerChannel > 16 ? 4 : 2;
+
+    // 依据格式标志精确判断样本位宽，而不是只看 mBitsPerChannel。
+    // 浮点格式下 mBitsPerChannel 与实际存储宽度可能不一致。
+    if ((processingFormat->mFormatFlags & kAudioFormatFlagIsFloat) != 0) {
+        context.bytesPerSample = (processingFormat->mBitsPerChannel == 64) ? 8 : 4;
+    } else {
+        context.bytesPerSample = (processingFormat->mBitsPerChannel > 16) ? 4 : 2;
+    }
     context.formatFlags = processingFormat->mFormatFlags;
 }
 
 static float FBSampleValue(const uint8_t *bytes, UInt32 bytesPerSample, AudioFormatFlags flags) {
+    if (bytes == NULL) {
+        return 0;
+    }
     if ((flags & kAudioFormatFlagIsFloat) != 0) {
         if (bytesPerSample == sizeof(float)) {
             float value = 0;
@@ -57,17 +72,30 @@ static float FBSampleValue(const uint8_t *bytes, UInt32 bytesPerSample, AudioFor
             memcpy(&value, bytes, sizeof(double));
             return isfinite(value) ? (float)value : 0;
         }
+        return 0;
     }
 
+    // 整数格式需要处理「有符号 / 无符号」两种表示。
+    const BOOL isSigned = (flags & kAudioFormatFlagIsSignedInteger) != 0;
     if (bytesPerSample == sizeof(int16_t)) {
-        int16_t value = 0;
+        if (isSigned) {
+            int16_t value = 0;
+            memcpy(&value, bytes, sizeof(value));
+            return (float)value / 32768.0f;
+        }
+        uint16_t value = 0;
         memcpy(&value, bytes, sizeof(value));
-        return (float)value / 32768.0f;
+        return ((float)value - 32768.0f) / 32768.0f;
     }
     if (bytesPerSample >= sizeof(int32_t)) {
-        int32_t value = 0;
+        if (isSigned) {
+            int32_t value = 0;
+            memcpy(&value, bytes, sizeof(value));
+            return (float)((double)value / 2147483648.0);
+        }
+        uint32_t value = 0;
         memcpy(&value, bytes, sizeof(value));
-        return (float)value / 2147483648.0f;
+        return (float)(((double)value - 2147483648.0) / 2147483648.0);
     }
     return 0;
 }
@@ -92,8 +120,9 @@ static void FBTapProcess(
         &sourceFrames
     );
 
-    if (status != noErr || sourceFrames == 0) {
-        *numberFramesOut = 0;
+    // 任何异常路径都必须回填 out 参数，否则播放器会认为没有可用帧而卡住。
+    if (status != noErr || sourceFrames <= 0 || context == nil) {
+        *numberFramesOut = (status == noErr) ? sourceFrames : 0;
         if (flagsOut != NULL) {
             *flagsOut = sourceFlags;
         }
@@ -105,11 +134,19 @@ static void FBTapProcess(
         *flagsOut = sourceFlags;
     }
 
+    if (context.handler == nil) {
+        return;
+    }
+
     const UInt32 channels = MAX(1, context.channelCount);
     const UInt32 bytesPerSample = MAX(1, context.bytesPerSample);
     const BOOL nonInterleaved = (context.formatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
-    NSMutableData *monoData = [NSMutableData dataWithLength:sourceFrames * sizeof(float)];
-    float *mono = (float *)monoData.mutableBytes;
+
+    // 复用缓冲区，避免音频实时线程上的分配开销。
+    if (context.scratch == nil || context.scratch.length < (NSUInteger)(sourceFrames * sizeof(float))) {
+        context.scratch = [NSMutableData dataWithLength:(NSUInteger)(sourceFrames * sizeof(float))];
+    }
+    float *mono = (float *)context.scratch.mutableBytes;
 
     for (CMItemCount frame = 0; frame < sourceFrames; frame++) {
         float sum = 0;
@@ -123,6 +160,10 @@ static void FBTapProcess(
             if (audioBuffer.mData == NULL) {
                 continue;
             }
+            if ((NSUInteger)(frame * (nonInterleaved ? bytesPerSample : bytesPerSample * channels) + bytesPerSample)
+                > audioBuffer.mDataByteSize) {
+                continue;
+            }
             UInt32 stride = nonInterleaved ? bytesPerSample : bytesPerSample * channels;
             const uint8_t *sample = (const uint8_t *)audioBuffer.mData + frame * stride;
             if (!nonInterleaved) {
@@ -134,13 +175,19 @@ static void FBTapProcess(
         mono[frame] = validChannels == 0 ? 0 : sum / (float)validChannels;
     }
 
-    NSData *deliveryData = [monoData copy];
+    // 复制出来再异步投递：scratch 会被下一次 process 覆写。
+    NSUInteger sampleCount = (NSUInteger)sourceFrames;
+    NSData *deliveryData = [NSData dataWithBytes:mono length:sampleCount * sizeof(float)];
     double sampleRate = context.sampleRate > 0 ? context.sampleRate : 44100.0;
-    dispatch_async(context.deliveryQueue, ^{
-        FBAudioPCMHandler handler = context.handler;
-        if (handler != nil) {
-            handler(deliveryData, sampleRate);
-        }
+    dispatch_queue_t queue = context.deliveryQueue;
+    FBAudioPCMHandler handler = context.handler;
+
+    if (queue == nil || handler == nil) {
+        return;
+    }
+    dispatch_async(queue, ^{
+        const float *samples = (const float *)deliveryData.bytes;
+        handler(samples, sampleCount, sampleRate);
     });
 }
 
@@ -167,10 +214,12 @@ static void FBTapProcess(
     callbacks.process = FBTapProcess;
 
     MTAudioProcessingTapRef tap = NULL;
+    // 使用 PreEffects：拿到的是解码后的原始音频，不受音量/均衡器等
+    // 播放器后处理影响，识别准确率更稳定。
     OSStatus status = MTAudioProcessingTapCreate(
         kCFAllocatorDefault,
         &callbacks,
-        kMTAudioProcessingTapCreationFlag_PostEffects,
+        kMTAudioProcessingTapCreationFlag_PreEffects,
         &tap
     );
     if (status != noErr || tap == NULL) {
@@ -185,8 +234,17 @@ static void FBTapProcess(
     audioMix.inputParameters = @[parameters];
     item.audioMix = audioMix;
 
+    // audioMix 已持有 tap，这里释放创建时的那份引用。
     CFRelease(tap);
     return YES;
+}
+
++ (void)uninstallFromPlayerItem:(AVPlayerItem *)item {
+    if (item == nil) {
+        return;
+    }
+    // 清空 audioMix 会释放 tap，其 finalize 回调负责释放 context。
+    item.audioMix = nil;
 }
 
 @end
