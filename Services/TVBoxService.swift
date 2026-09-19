@@ -67,14 +67,17 @@ enum TVBoxService {
         if isMD5Document(text), url.pathExtension.lowercased() == "md5" {
             let scriptURL = siblingJavaScriptURL(for: url)
             let (scriptData, scriptResponse) = try await fetch(scriptURL)
+            RuntimeDiagnostics.record("spider.download status=\(scriptResponse.statusCode) bytes=\(scriptData.count)")
             guard scriptResponse.statusCode < 400 else {
                 throw TVBoxServiceError.remoteStatus(scriptResponse.statusCode)
             }
             let expected = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let actual = md5(scriptData)
             guard expected == actual else {
+                RuntimeDiagnostics.record("spider.checksum.failed")
                 throw TVBoxServiceError.javascriptRuntimeRequired(detail: "index.js 校验值不一致")
             }
+            RuntimeDiagnostics.record("spider.checksum.verified")
             let baseURL = try await NodeRuntime.shared.start(scriptData: scriptData, cacheKey: actual)
             return try await loadNodeSpiderItems(baseURL: baseURL, sourceID: sourceID)
         }

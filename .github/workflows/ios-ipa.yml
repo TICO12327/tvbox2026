@@ -21,6 +21,13 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test generated Node bootstrap
+        run: node --test Tests/bootstrap.test.mjs
+
       - name: Download NodeMobile framework
         run: |
           mkdir -p Vendor

@@ -5,6 +5,8 @@ struct SourcesView: View {
     @State private var sourceName = ""
     @State private var sourceURL = ""
     @State private var sourceFormat: SourceFormat = .auto
+    @State private var diagnosticText = ""
+    @State private var showingDiagnostics = false
 
     var body: some View {
         NavigationStack {
@@ -24,11 +26,32 @@ struct SourcesView: View {
                         if let error = library.lastError {
                             Text(error).font(.footnote).foregroundStyle(.orange)
                         }
+                        Button("查看 / 导出诊断日志") {
+                            diagnosticText = RuntimeDiagnostics.snapshot()
+                            showingDiagnostics = true
+                        }
                     }
                     .padding(18)
                 }
             }
             .navigationTitle("源管理")
+            .sheet(isPresented: $showingDiagnostics) {
+                NavigationStack {
+                    ScrollView {
+                        Text(diagnosticText).font(.caption.monospaced())
+                            .textSelection(.enabled).padding()
+                    }
+                    .navigationTitle("刷新诊断")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("完成") { showingDiagnostics = false }
+                        }
+                        ToolbarItem(placement: .bottomBar) {
+                            ShareLink(item: diagnosticText) { Label("导出日志", systemImage: "square.and.arrow.up") }
+                        }
+                    }
+                }
+            }
         }
     }
 

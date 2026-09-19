@@ -56,6 +56,7 @@ final class LibraryStore: ObservableObject {
             return
         }
         isRefreshing = true
+        RuntimeDiagnostics.record("source.refresh.begin")
         defer { isRefreshing = false }
 
         do {
@@ -63,6 +64,7 @@ final class LibraryStore: ObservableObject {
             request.timeoutInterval = 20
             request.setValue("FlowBox/1.0", forHTTPHeaderField: "User-Agent")
             let (data, response) = try await URLSession.shared.data(for: request)
+            RuntimeDiagnostics.record("source.download status=\((response as? HTTPURLResponse)?.statusCode ?? 0) bytes=\(data.count)")
             guard (response as? HTTPURLResponse)?.statusCode ?? 500 < 400 else {
                 throw URLError(.badServerResponse)
             }
@@ -93,7 +95,10 @@ final class LibraryStore: ObservableObject {
             }
             lastError = nil
             persist()
+            RuntimeDiagnostics.record("source.refresh.success items=\(unique.count)")
         } catch {
+            let nsError = error as NSError
+            RuntimeDiagnostics.record("source.refresh.failed domain=\(nsError.domain) code=\(nsError.code)")
             lastError = error.localizedDescription
         }
     }

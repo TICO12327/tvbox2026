@@ -14,6 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
                        error:(NSError * _Nullable * _Nullable)error;
 
 + (BOOL)isRunning;
++ (int)lastExitCode;
 
 @end
 

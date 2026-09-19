@@ -20,6 +20,8 @@ static dispatch_queue_t FBNodeRunnerQueue(void) {
 }
 
 static BOOL FBNodeRunnerStarted = NO;
+static BOOL FBNodeRunnerHasStarted = NO;
+static int FBNodeRunnerExitCode = 0;
 
 + (BOOL)startWithScriptPath:(NSString *)scriptPath
                         port:(NSInteger)port
@@ -37,6 +39,15 @@ static BOOL FBNodeRunnerStarted = NO;
         if (FBNodeRunnerStarted) {
             return YES;
         }
+        // NodeMobile cannot be initialized a second time in the same process.
+        if (FBNodeRunnerHasStarted) {
+            if (error != NULL) {
+                *error = [NSError errorWithDomain:@"FlowBox.NodeRuntime" code:2
+                    userInfo:@{NSLocalizedDescriptionKey: @"NodeJS 已结束，必须重启流映后才能再次启动"}];
+            }
+            return NO;
+        }
+        FBNodeRunnerHasStarted = YES;
         FBNodeRunnerStarted = YES;
     }
 
@@ -68,11 +79,12 @@ static BOOL FBNodeRunnerStarted = NO;
             }
 
             char *argumentBuffer = (char *)calloc(bufferSize, sizeof(char));
-            char **argv = (char **)calloc(arguments.count, sizeof(char *));
+            char **argv = (char **)calloc(arguments.count + 1, sizeof(char *));
             if (argumentBuffer == NULL || argv == NULL) {
                 free(argumentBuffer);
                 free(argv);
                 @synchronized (self) {
+                    FBNodeRunnerExitCode = -1;
                     FBNodeRunnerStarted = NO;
                 }
                 return;
@@ -89,11 +101,13 @@ static BOOL FBNodeRunnerStarted = NO;
                 cursor += length + 1;
             }
 
-            node_start(argc, argv);
+            int exitCode = node_start(argc, argv);
+            NSLog(@"[FlowBox] node_start returned %d; restart disabled", exitCode);
 
             free(argv);
             free(argumentBuffer);
             @synchronized (self) {
+                FBNodeRunnerExitCode = exitCode;
                 FBNodeRunnerStarted = NO;
             }
         }
@@ -105,6 +119,12 @@ static BOOL FBNodeRunnerStarted = NO;
 + (BOOL)isRunning {
     @synchronized (self) {
         return FBNodeRunnerStarted;
+    }
+}
+
++ (int)lastExitCode {
+    @synchronized (self) {
+        return FBNodeRunnerExitCode;
     }
 }
 
